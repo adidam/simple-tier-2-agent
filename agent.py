@@ -36,7 +36,18 @@ client = wrap_openai(OpenAI(
 MODEL = "moonshotai/kimi-k3"  # swap to any model OpenRouter hosts, no code change
 
 def ask(question: str):
-    messages = [{"role": "user", "content": question}]
+    messages =  [
+      {
+        "role": "system",
+        "content": (
+            "You are a financial data assistant. Use the get_stock_info tool "
+            "to answer questions about stock prices and ratios. If the tool "
+            "returns an error field, tell the user the ticker wasn't found — "
+            "never invent or guess financial data."
+        )
+      },
+      {"role": "user", "content": question}
+    ]
 
     response = client.chat.completions.create(
         model=MODEL,
