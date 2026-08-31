@@ -4,6 +4,7 @@ from openai import OpenAI
 from tools import get_stock_info, get_price_history
 from dotenv import load_dotenv
 from langsmith.wrappers import wrap_openai
+from langsmith import traceable
 
 load_dotenv()
 
@@ -55,12 +56,15 @@ client = wrap_openai(OpenAI(
 # MODEL = "meta/muse-spark-1.2"
 MODEL = "moonshotai/kimi-k3"  # swap to any model OpenRouter hosts, no code change
 
+@traceable
 def ask(question: str):
     messages =  [
       {
         "role": "system",
         "content": (
             "You are a financial data assistant. Use the get_stock_info, get_price_history tools "
+            "you can call the tools multiple times across turns if you need to reason step by step, "
+            "before before deciding on the final tool call "
             "to answer questions about stock prices and ratios. If the tool "
             "returns an error field, tell the user the ticker wasn't found — "
             "never invent or guess financial data."
@@ -68,18 +72,24 @@ def ask(question: str):
       },
       {"role": "user", "content": question}
     ]
+    
+    max_iterations = 5   
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        tools=tools,
-        messages=messages
-    )
-    msg = response.choices[0].message
-    print(f"Model requested {len(msg.tool_calls)} tool call(s): {[tc.function.name for tc in msg.tool_calls]}")
-
-    if msg.tool_calls:
+    for iteration in range(max_iterations):
+        response = client.chat.completions.create(
+            model=MODEL,
+            tools=tools,
+            messages=messages
+        )
+        msg = response.choices[0].message
         messages.append(msg)
-        
+
+        if not msg.tool_calls:
+            # model decided it has enough info — this is the exit condition
+            return msg.content
+
+        print(f"Model requested {len(msg.tool_calls)} tool call(s): {[tc.function.name for tc in msg.tool_calls]}")
+
         for tool_call in msg.tool_calls:
             try:
                 args = json.loads(tool_call.function.arguments)
@@ -102,13 +112,8 @@ def ask(question: str):
                 "content": json.dumps(result)
             })
 
-    final = client.chat.completions.create(
-        model=MODEL,
-        tools=tools,
-        messages=messages
-    )
-
-    return final.choices[0].message.content
+    # if we exit the for-loop without returning, the cap was hit
+    return "I wasn't able to resolve this within the allowed number of steps."
 
 if __name__ == "__main__":
     import sys
