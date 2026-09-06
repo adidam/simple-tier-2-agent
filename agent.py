@@ -165,22 +165,61 @@ def parse_plan(plan_text: str):
 
 def report_plan_deviation(planned_steps, executed_calls):
     if not planned_steps:
-        return  # plan failed to parse — nothing to compare against
-    executed_set = set(executed_calls)
+        return
+    covered = set()
+    for tool, ticker, substituted_from in executed_calls:
+        covered.add((tool, ticker))
+        if substituted_from:
+            covered.add((tool, substituted_from))
+
     for step in planned_steps:
         tool, ticker = step.get("tool"), step.get("ticker")
         if ticker is None:
-            continue  # dependent step — ticker was only knowable at runtime, can't compare directly
-        if (tool, ticker) not in executed_set:
+            continue
+        if (tool, ticker) not in covered:
             print(
                 f"⚠️  Plan deviation: step {step['step']} ({tool} on {ticker}) was planned but never executed.")
 
 
+def dispatch_tool(name: str, args: dict) -> dict:
+    if name == "get_stock_info":
+        return get_stock_info(args["ticker"])
+    elif name == "get_price_history":
+        return get_price_history(args["ticker"], args.get("period", "6mo"))
+    elif name == "get_company_profile":
+        return get_company_profile(args["ticker"])
+    else:
+        return {"error": f"Unknown tool: {name}"}
+
+
+def is_not_found_error(result: dict) -> bool:
+    err = (result.get("error") or "").lower()
+    return "not found" in err or "no profile data" in err or "unable to fetch" in err
+
+
+def suggest_ticker_correction(bad_ticker: str) -> str | None:
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": (
+                "You are a ticker-symbol correction assistant. Given a stock ticker that "
+                "returned no data, suggest the most likely correct NSE ticker symbol "
+                "(ending in .NS). Respond with ONLY the ticker, or the single word UNKNOWN "
+                "if you have no confident guess. No explanation."
+            )},
+            {"role": "user", "content": f"This ticker returned no data: {bad_ticker}"}
+        ]
+    )
+    suggestion = response.choices[0].message.content.strip()
+    return None if suggestion.upper() == "UNKNOWN" else suggestion
+
+
 @traceable
 def ask(question: str):
-    plan_text = get_plan(question)   # your new planning call
+    plan_text = get_plan(question)
     planned_steps = parse_plan(plan_text)
     print(f"Plan for question '{question}':\n{plan_text}\n")
+
     messages = [
         {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -188,54 +227,81 @@ def ask(question: str):
     ]
 
     max_iterations = 5
-    executed_calls = []  # (tool_name, ticker) actually run
+    executed_calls = []
+    ticker_corrections = {}  # bad_ticker -> accepted correction, remembered for this run
 
     for iteration in range(max_iterations):
         response = client.chat.completions.create(
-            model=MODEL,
-            tools=tools,
-            messages=messages
-        )
+            model=MODEL, tools=tools, messages=messages)
         msg = response.choices[0].message
         messages.append(msg)
 
         if not msg.tool_calls:
-            # model decided it has enough info — this is the exit condition
             return msg.content
 
-        print(
-            f"Model requested {len(msg.tool_calls)} tool call(s): {[tc.function.name for tc in msg.tool_calls]}")
+        print(f"Model requested {len(msg.tool_calls)} tool call(s): "
+              f"{[tc.function.name for tc in msg.tool_calls]}")
 
         for tool_call in msg.tool_calls:
+            substituted_from = None
+
             try:
                 args = json.loads(tool_call.function.arguments)
             except json.JSONDecodeError:
-                result = {"error": "Model returned malformed tool arguments"}
-            else:
-                executed_calls.append(
-                    (tool_call.function.name, args.get("ticker")))
-                try:
-                    if tool_call.function.name == "get_stock_info":
-                        result = get_stock_info(args["ticker"])
-                    elif tool_call.function.name == "get_price_history":
-                        result = get_price_history(
-                            args["ticker"], args.get("period", "6mo"))
-                    elif tool_call.function.name == "get_company_profile":
-                        result = get_company_profile(args["ticker"])
-                    else:
-                        result = {
-                            "error": f"Unknown tool: {tool_call.function.name}"}
-                except Exception as e:
-                    result = {"error": f"Tool execution failed: {e}"}
+                messages.append({
+                    "role": "tool", "tool_call_id": tool_call.id,
+                    "content": json.dumps({"error": "Model returned malformed tool arguments"})
+                })
+                continue
 
+            original_ticker = args.get("ticker")
+
+            # already corrected once this run? apply silently, no re-prompt
+            if original_ticker in ticker_corrections:
+                substituted_from = original_ticker
+                args["ticker"] = ticker_corrections[original_ticker]
+                print(
+                    f"↪️  Reusing accepted correction: {original_ticker} → {args['ticker']}")
+
+            try:
+                result = dispatch_tool(tool_call.function.name, args)
+            except Exception as e:
+                result = {"error": f"Tool execution failed: {e}"}
+
+            if original_ticker and original_ticker not in ticker_corrections and is_not_found_error(result):
+                suggestion = suggest_ticker_correction(original_ticker)
+                if suggestion:
+                    answer = input(
+                        f"\n⚠️  '{original_ticker}' returned no data. Did you mean "
+                        f"'{suggestion}'? [y] accept and retry / [n] stop: "
+                    ).strip().lower()
+
+                    if answer == "y":
+                        ticker_corrections[original_ticker] = suggestion
+                        args["ticker"] = suggestion
+                        substituted_from = original_ticker
+                        try:
+                            result = dispatch_tool(
+                                tool_call.function.name, args)
+                            print(
+                                f"✅ Using {suggestion} instead of {original_ticker}")
+                        except Exception as e:
+                            result = {
+                                "error": f"Tool execution failed after substitution: {e}"}
+                    else:
+                        executed_calls.append(
+                            (tool_call.function.name, args.get("ticker"), substituted_from))
+                        report_plan_deviation(planned_steps, executed_calls)
+                        return f"Stopped: '{original_ticker}' wasn't found and the suggested correction was declined."
+
+            executed_calls.append(
+                (tool_call.function.name, args.get("ticker"), substituted_from))
             messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
+                "role": "tool", "tool_call_id": tool_call.id,
                 "content": json.dumps(result)
             })
 
     report_plan_deviation(planned_steps, executed_calls)
-    # if we exit the for-loop without returning, the cap was hit
     return "I wasn't able to resolve this within the allowed number of steps."
 
 
