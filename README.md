@@ -7,7 +7,8 @@ Progression so far:
 - **Tier 2**: single LLM → tool → LLM round trip
 - **Tier 2.5**: multiple tools, multi-tool-call handling in one response
 - **Tier 3**: ReAct loop — call a tool, observe, decide whether to call another
-- **Tier 4 (current)**: explicit planner + executor — the model writes a plan before executing, then the executor loop runs against that plan, with a check that flags when execution deviates from what was planned
+- **Tier 4**: explicit planner + executor — the model writes a plan before executing, then the executor loop runs against that plan, with a check that flags when execution deviates from what was planned
+- **v4.1 (current)**: fixed plan instability with a few-shot example in the planner prompt; tightened the executor prompt to cover all three tools, explain the injected plan, and separate fact from interpretation
 
 ## What it does
 
@@ -17,27 +18,27 @@ uv run python agent.py "What does INFY.NS's business actually do?"
 uv run python agent.py "Give me a full picture of INFY.NS: valuation, past year performance, what its business does, and how it compares to TCS.NS"
 ```
 
-The last example is the tier-4 test case: a compound question spanning valuation, momentum, qualitative business context, and a peer comparison — the kind of question a flat ReAct loop can handle but tends to approach without an inspectable strategy.
+The last example is the tier-4 test case: a compound question spanning valuation, momentum, qualitative business context, and a peer comparison.
 
 The agent:
 
-1. **Plans** — a dedicated call (no tools attached) asks the model to lay out its intended tool calls as structured JSON, including a `depends_on` field per step (only set when a step's arguments genuinely can't be known until an earlier step resolves — not just because two results will later be compared)
-2. **Executes** — the plan is injected as prior context into the existing tier-3 ReAct loop, which then calls tools, observes results, and continues until it has enough to answer
-3. **Checks for deviation** — after execution, planned tool calls (for steps with a known ticker) are compared against what was actually executed, and any planned-but-skipped step is flagged
-4. **Answers** — the model produces a final synthesized answer from everything gathered
+1. **Plans** — a dedicated call (no tools attached) asks the model to lay out its intended tool calls as structured JSON, including a `depends_on` field per step (only set when a step's arguments genuinely can't be known until an earlier step resolves — not just because two results will later be compared). The prompt includes a worked few-shot example showing that comparison questions require the SAME depth of tool calls for EACH entity being compared, not just the one named first in the question.
+2. **Executes** — the plan is injected as prior context into the existing tier-3 ReAct loop. The executor's system prompt explains that the plan is a strong guide (not a rigid script), names all three available tools, and instructs the model to explicitly report any planned step it decides to skip and why.
+3. **Checks for deviation** — after execution, planned tool calls (for steps with a known ticker) are compared in code against what was actually executed, and any planned-but-skipped step is flagged. This is a second, independent check alongside the model's own self-reported plan adherence.
+4. **Answers** — the model produces a final synthesized answer, explicitly separating factual data from its own interpretation (e.g. moat or competitive-position judgments).
 
 ## Tools
 
 - `get_stock_info(ticker)` — current price and financial ratios
 - `get_price_history(ticker, period)` — historical price performance
-- `get_company_profile(ticker)` — business description, sector, industry, employee count (added in tier 4 specifically to answer qualitative "what does this business do" questions that pure ratios can't address)
+- `get_company_profile(ticker)` — business description, sector, industry, employee count
 
 ## Tech stack
 
 - **Python**, managed with **uv**
 - **yfinance** — market data source
 - **OpenAI SDK** pointed at **OpenRouter** — provider-agnostic, model swappable via a single string
-- **LangSmith** — tracing, with `@traceable` on the main loop so a full multi-step question nests under one parent trace
+- **LangSmith** — tracing, with `@traceable` on the main loop
 
 ## Setup
 
@@ -68,12 +69,13 @@ pyproject.toml / uv.lock
 
 ## Design notes
 
-- All three tools return trimmed payloads with a consistent `error` field — including on paths where the underlying library doesn't raise an exception but returns empty data (a real bug found and fixed in `get_company_profile`, where an invalid ticker returned `error: null` alongside an empty profile until explicitly checked for).
-- The planner uses a separate system prompt and is called with no `tools` parameter, forcing a text/JSON plan rather than a tool_calls response.
-- **Dependency test in the planner prompt**: a step depends on another ONLY if its arguments cannot be determined without the earlier step's result — explicitly NOT just because two results will be compared or discussed together later. This distinction was loose in an early version of the prompt and had to be tightened; without it, the model over-reported dependencies that weren't real.
-- The plan is injected into the executor's message history as a prior assistant turn, so the existing tier-3 loop (unchanged) tends to act on it without needing a rewritten execution engine.
-- **Known limitation — plan instability**: the same question, run twice, can produce different plans (e.g., one run planned 6 steps including a peer's business profile; a later run planned only 5 and omitted it). This is model non-determinism in the planning step itself, distinct from execution deviating from a fixed plan. Not solved here — noted as a real, observed limitation of the pattern rather than an assumed one.
-- **Deviation checking**: after execution, planned steps with a known ticker are compared against what actually ran; a mismatch prints a warning. Steps with `ticker: null` (genuinely dependent steps, resolved only at runtime) are skipped in this comparison, since they can't be matched by ticker ahead of time — a harder problem left open.
+- All three tools return trimmed payloads with a consistent `error` field — including on paths where the underlying library doesn't raise an exception but returns empty data (a real bug found and fixed in `get_company_profile`).
+- The planner uses a separate system prompt and is called with no `tools` parameter, forcing a JSON plan rather than a tool_calls response.
+- **Dependency test in the planner prompt**: a step depends on another ONLY if its arguments cannot be determined without the earlier step's result — explicitly NOT just because two results will be compared later.
+- **Plan instability, found and fixed**: the same compound question, run twice, initially produced different plans (a 6-step plan covering both compared companies fully vs. a 5-step plan that silently dropped one company's profile lookup). Fixed by adding a few-shot example to the planner prompt showing that comparison questions require symmetric tool coverage across every entity mentioned. Confirmed stable across multiple repeated runs, including on a different pair of tickers, after the fix.
+- **Executor prompt now explicitly**: names all three tools, explains that an injected plan is a guide (not a script) and any skipped step must be announced, and instructs fact/interpretation separation for qualitative topics. Previously this prompt only mentioned two tools and said nothing about the plan or interpretation — the model was still finding and using the third tool via its schema alone, but silent step-skipping and unflagged interpretive claims were more likely without explicit instruction.
+- **Observed: model self-correction on bad tickers.** When a planned ticker 404'd (e.g. `IDFCFIRST.NS`), the model inferred and retried the correct real ticker (`IDFCFIRSTB.NS`) on its own and disclosed the substitution in its answer. Useful, but noted as an open design question: this relies on the model guessing correctly, and a similarly-named-but-different company could plausibly be substituted incorrectly. Not yet decided whether to keep this autonomy or force a stop-and-ask on ticker-not-found instead.
+- **Known gap: the code-level deviation checker matches by exact ticker string**, so a model self-correction like the one above (different ticker than planned, same intent) would likely be flagged as a false-positive deviation by the code checker even though the model's own self-report correctly distinguished "all steps completed" from "one ticker substituted." The two checks (model self-report vs. code-level check) can disagree on cases like this — not yet reconciled.
 
 ## Roadmap
 
@@ -82,7 +84,9 @@ pyproject.toml / uv.lock
 - [x] ReAct loop for multi-step, dependent questions
 - [x] Third tool (company profile) for qualitative business questions
 - [x] Planner + executor with plan-vs-execution deviation checking
-- [ ] Address plan instability (e.g. lower planner temperature, few-shot examples, or a dedicated planning model)
+- [x] Plan instability investigated and fixed via few-shot example, confirmed across repeated runs
+- [ ] Reconcile the code-level deviation checker with legitimate ticker substitutions (currently a likely false positive)
+- [ ] Decide whether to allow model-driven ticker self-correction or force explicit confirmation
 - [ ] Web search tool for questions with no structured data source (e.g. management quality, recent news)
 - [ ] Multi-agent architecture (likely via LangGraph) as the system grows toward the full value-investing use case
 - [ ] Extend toward an agentic value-investing system (Zerodha/NSE data, paper trading, position guardrails)
