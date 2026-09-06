@@ -3,6 +3,7 @@ import json
 import re
 from openai import OpenAI
 from tools import get_stock_info, get_price_history, get_company_profile
+from tools import get_web_search
 from dotenv import load_dotenv
 from langsmith.wrappers import wrap_openai
 from langsmith import traceable
@@ -66,6 +67,29 @@ tools = [{
             "required": ["ticker"]
         }
     }
+}, {
+    "type": "function",
+    "function": {
+        "name": "get_web_search",
+        "description": (
+            "Search the web for current, qualitative information NOT available from the "
+            "other tools — news, management commentary, analyst opinions, competitive "
+            "positioning, recent events. Use this for questions about what's happening "
+            "with a company recently, or judgment-based topics like moat or management "
+            "quality. Do NOT use this for price, valuation ratios, or historical "
+            "performance — those come from get_stock_info and get_price_history."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query, e.g. 'Infosys management changes 2026'"
+                }
+            },
+            "required": ["query"]
+        }
+    }
 }]
 
 PLANNER_SYSTEM_PROMPT = """You are a planning assistant for a stock research agent.
@@ -75,6 +99,9 @@ Available tools the executor can use:
 - get_stock_info(ticker): current price and financial ratios (PE, market cap, etc.)
 - get_price_history(ticker, period): historical price performance over a time period
 - get_company_profile(ticker): business description, sector, industry, employee count
+- get_web_search(query): current news, commentary, and qualitative context not
+  available from the other tools (e.g. management changes, recent events, analyst
+  sentiment, competitive moat discussion)
 
 Given the user's question, write a short numbered plan listing which tool(s) should be
 called, in what order, and why each one is needed.
@@ -82,6 +109,10 @@ called, in what order, and why each one is needed.
 When a question involves comparing or describing MULTIPLE companies, plan the SAME
 set of relevant tool calls for EACH company mentioned — do not cover one company more
 thoroughly than another just because the question's wording focuses on one of them first.
+
+Only include a get_web_search step when the question genuinely needs current news or
+qualitative judgment that the other three tools cannot provide — do not add it reflexively
+to every plan.
 
 Example:
 Question: "Give me a full picture of AAA.NS: valuation, performance, what its business
@@ -116,11 +147,12 @@ Respond with ONLY the JSON array, no other text — the example above is for you
 reference only, do not include it in your response."""
 
 EXECUTOR_SYSTEM_PROMPT = (
-    "You are a financial research assistant. You have access to three tools: "
+    "You are a financial research assistant. You have access to four tools: "
     "get_stock_info (price and valuation ratios), get_price_history (historical "
-    "price performance), and get_company_profile (business description, sector, "
-    "industry). You may call tools multiple times across turns, reasoning step by "
-    "step, before deciding on a final answer.\n\n"
+    "price performance), get_company_profile (business description, sector, "
+    "industry), and get_web_search (current news, commentary, and qualitative "
+    "context not available from the other tools). You may call tools multiple "
+    "times across turns, reasoning step by step, before deciding on a final answer.\n\n"
     "You will sometimes be given a plan describing an intended sequence of tool "
     "calls before you begin. Treat it as a strong guide, not a rigid script — if "
     "you determine a planned step isn't needed to answer the question, you may "
@@ -129,7 +161,10 @@ EXECUTOR_SYSTEM_PROMPT = (
     "If a tool returns an error field, tell the user the ticker wasn't found — "
     "never invent or guess financial data. When discussing qualitative topics "
     "like business moat or competitive position, clearly frame this as your "
-    "interpretation based on the available data, not as an established fact."
+    "interpretation based on the available data, not as an established fact. "
+    "When you use get_web_search results, briefly note where the information "
+    "came from (e.g. 'according to recent coverage') rather than presenting it "
+    "with the same certainty as structured financial data."
 )
 
 client = wrap_openai(OpenAI(
@@ -188,6 +223,8 @@ def dispatch_tool(name: str, args: dict) -> dict:
         return get_price_history(args["ticker"], args.get("period", "6mo"))
     elif name == "get_company_profile":
         return get_company_profile(args["ticker"])
+    elif name == "get_web_search":
+        return get_web_search(args["query"])
     else:
         return {"error": f"Unknown tool: {name}"}
 
