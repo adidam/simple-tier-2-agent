@@ -77,9 +77,29 @@ Available tools the executor can use:
 - get_company_profile(ticker): business description, sector, industry, employee count
 
 Given the user's question, write a short numbered plan listing which tool(s) should be
-called, in what order, and why each one is needed. If a step depends on the result of an
-earlier step (e.g. "compare X and Y, then look up the winner's history"), say so explicitly.
-Do not attempt to answer the question yourself — only produce the plan.
+called, in what order, and why each one is needed.
+
+When a question involves comparing or describing MULTIPLE companies, plan the SAME
+set of relevant tool calls for EACH company mentioned — do not cover one company more
+thoroughly than another just because the question's wording focuses on one of them first.
+
+Example:
+Question: "Give me a full picture of AAA.NS: valuation, performance, what its business
+does, and how it compares to BBB.NS"
+
+Plan:
+[
+  {"step": 1, "tool": "get_stock_info", "ticker": "AAA.NS", "reason": "Valuation for AAA.NS", "depends_on": []},
+  {"step": 2, "tool": "get_price_history", "ticker": "AAA.NS", "reason": "Performance for AAA.NS", "depends_on": []},
+  {"step": 3, "tool": "get_company_profile", "ticker": "AAA.NS", "reason": "What AAA.NS's business does", "depends_on": []},
+  {"step": 4, "tool": "get_stock_info", "ticker": "BBB.NS", "reason": "Valuation for BBB.NS, to compare against AAA.NS", "depends_on": []},
+  {"step": 5, "tool": "get_price_history", "ticker": "BBB.NS", "reason": "Performance for BBB.NS, to compare against AAA.NS", "depends_on": []},
+  {"step": 6, "tool": "get_company_profile", "ticker": "BBB.NS", "reason": "What BBB.NS's business does, for a complete comparison", "depends_on": []}
+]
+
+Notice BBB.NS gets a company profile step too, even though the question only explicitly
+asked "what its business does" about AAA.NS — a genuine comparison requires understanding
+both businesses, not just one.
 
 Output the plan as a JSON array. Each step has:
 - "step": integer id
@@ -92,7 +112,25 @@ Output the plan as a JSON array. Each step has:
 A step depends on another ONLY if you literally cannot fill in its arguments
 without seeing the earlier step's result. Comparing results later does not count.
 
-Respond with ONLY the JSON array, no other text."""
+Respond with ONLY the JSON array, no other text — the example above is for your
+reference only, do not include it in your response."""
+
+EXECUTOR_SYSTEM_PROMPT = (
+    "You are a financial research assistant. You have access to three tools: "
+    "get_stock_info (price and valuation ratios), get_price_history (historical "
+    "price performance), and get_company_profile (business description, sector, "
+    "industry). You may call tools multiple times across turns, reasoning step by "
+    "step, before deciding on a final answer.\n\n"
+    "You will sometimes be given a plan describing an intended sequence of tool "
+    "calls before you begin. Treat it as a strong guide, not a rigid script — if "
+    "you determine a planned step isn't needed to answer the question, you may "
+    "skip it, but explicitly say in your final answer which planned step you "
+    "skipped and why.\n\n"
+    "If a tool returns an error field, tell the user the ticker wasn't found — "
+    "never invent or guess financial data. When discussing qualitative topics "
+    "like business moat or competitive position, clearly frame this as your "
+    "interpretation based on the available data, not as an established fact."
+)
 
 client = wrap_openai(OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -144,19 +182,9 @@ def ask(question: str):
     planned_steps = parse_plan(plan_text)
     print(f"Plan for question '{question}':\n{plan_text}\n")
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a financial data assistant. Use the get_stock_info, get_price_history tools "
-                "you can call the tools multiple times across turns if you need to reason step by step, "
-                "before before deciding on the final tool call "
-                "to answer questions about stock prices and ratios. If the tool "
-                "returns an error field, tell the user the ticker wasn't found — "
-                "never invent or guess financial data."
-            )
-        },
+        {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT},
         {"role": "user", "content": question},
-        {"role": "assistant", "content": f"Here is my plan before executing:\n{plan_text}"}
+        {"role": "assistant", "content": f"Here is my plan before executing:\n{plan_text}"},
     ]
 
     max_iterations = 5
