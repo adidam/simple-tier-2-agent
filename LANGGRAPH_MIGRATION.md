@@ -71,3 +71,80 @@ reproduces exactly the failure mode it was built to prevent.
   capability (e.g. tool calling) before random selection — safer than pinning an
   arbitrary free model ID directly, at the cost of not knowing in advance which
   underlying model will actually serve a given request.
+
+### Update: ticker-correction interrupt() ported and verified
+
+The hallucination bug above is fixed. Ported the ticker-correction + stop-on-decline
+flow into `agent_graph.py` using LangGraph's native `interrupt()` — placed INSIDE each
+tool wrapper function (stock_info, price_history, company_profile) rather than in a
+custom replacement for ToolNode, since interrupt() pauses the whole graph regardless
+of which function calls it. This let ToolNode stay prebuilt/unchanged, and keeps each
+tool's correction logic colocated with the tool itself rather than centralized in a
+generic node that would need to know about every tool's failure modes.
+
+Requires an `InMemorySaver` checkpointer (state must persist across the pause) and a
+`thread_id` in config; `ask()` now loops on `"__interrupt__" in result`, prompting the
+user and resuming via `Command(resume=answer)` — replacing the old blocking `input()`
+call site from the pre-interrupt version.
+
+Re-tested with the exact original failure case (`IDFCFIRST.NS`, not just the correct
+ticker): execution now correctly pauses, prompts, and either retries with the
+corrected ticker or stops cleanly — no hallucinated figures. Confirmed fixed.
+
+### New findings from re-testing (both worth fixing, neither blocking)
+
+**1. Interrupt resume re-executes the whole node, not just the paused call.**
+When a tool node contains multiple tool calls in one batch (e.g. stock_info +
+price_history + company_profile all requested together with a bad ticker), resuming
+from the FIRST interrupt causes LangGraph to replay the entire node from the top —
+re-triggering the NEXT tool's interrupt fresh, producing repeated 404s for what
+appeared to be the same already-answered correction. Observed: answered `y` once for
+IDFCFIRST.NS, but the same ticker 404'd twice more afterward before the next distinct
+interrupt (UJJIVAN.SI) appeared. Harmless here since all tools are read-only GETs, but
+flagged as a real risk for any future tool with a side effect (e.g. placing a trade) —
+resume-on-interrupt would double-execute it. Not fixed; noted for when this agent
+eventually touches the Zerodha paper-trading system.
+
+**2. `price_history`'s `period` argument has no value constraint in the LangGraph
+version.** The model passed a literal date ('2024-01-01') instead of a valid period
+string, causing a tool-side error ("Period '2024-01-01' is invalid, must be one of:
+1d, 5d, 1mo..."). The original agent.py's hand-written JSON schema didn't have an enum
+either, but the @tool-decorated version here relies only on a docstring example, which
+the model didn't reliably follow. Fix: use `Literal["1d", "5d", "1mo", ...]` as the
+type hint, which @tool converts into a real schema-level enum, making an invalid value
+impossible to send rather than just discouraged in prose. Not yet applied.
+
+### More serious finding: model overrode CORRECT tool data with a worse guess
+
+Confirmed via LangSmith trace inspection: `company_profile` was called successfully
+for IDFCFIRSTB.NS and returned the correct `fullTimeEmployees: 43059` in its tool
+result. Despite this being present and correct in context, the final answer's
+"Overview" table reported employee count as **"~30,000+ (estimated)"** — a materially
+wrong number, self-generated rather than read from the successful tool call, with a
+hedge word ("estimated") that makes it look like appropriate caution rather than what
+it actually is: silently disregarding correct, retrieved data.
+
+This is a more serious and harder-to-catch failure mode than the original hallucination
+bug. That bug occurred on tool FAILURE (a recognizable, catchable case, now fixed via
+the interrupt() correction flow). This occurs on tool SUCCESS — the retrieval, sourcing
+instructions, and fact/interpretation split can all be working exactly as designed, and
+a specific field can still be silently wrong, because the failure is in SYNTHESIS, not
+retrieval: the model apparently treated the answer's "Overview" table as general
+scene-setting prose (written from training-data recall) rather than a place requiring
+the same grounding discipline applied to the numbers table later in the same response.
+
+**Not yet fixed.** Candidate directions, not yet decided/implemented:
+
+1. Strengthen the system prompt: explicit instruction that EVERY specific figure in
+   the response, not just clearly "financial" ones, must trace to a tool call result —
+   including seemingly minor overview/background details like employee count or
+   founding year — and that hedge words ("estimated", "approximately") are not a
+   substitute for actually checking against retrieved data when a tool result for that
+   exact field exists in context.
+2. Consider whether letting the model draft a big-picture "overview" preamble at all
+   (as opposed to a purely tool-grounded facts table) is structurally risky — an
+   overview framed as "what I already know about this company" invites recall over
+   retrieval, even when retrieval is available and correct.
+3. This is a genuine, open reliability question worth carrying into any future
+   evaluation/eval-harness work (tier 6 territory) rather than something a single
+   prompt tweak is likely to fully close.

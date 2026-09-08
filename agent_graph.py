@@ -1,18 +1,22 @@
 import os
 import sys
 
+from agent import is_not_found_error, suggest_ticker_correction
+
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import get_stock_info, get_price_history, get_company_profile, get_web_search
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage
 from langchain_openai import ChatOpenAI
 
 
-from typing import Annotated
+from typing import Annotated, Literal
 from typing_extensions import TypedDict
 
 from dotenv import load_dotenv
@@ -36,13 +40,28 @@ class AgentState(TypedDict):
 @tool
 def stock_info(ticker: str) -> dict:
     """Get current price and key financial ratios (PE, market cap, etc.) for a stock ticker (NSE tickers end in .NS)."""
-    return get_stock_info(ticker)
+    result = get_stock_info(ticker)
+    if is_not_found_error(result):
+        suggestion = suggest_ticker_correction(ticker)
+        if suggestion:
+            answer = interrupt({
+                "type": "ticker_correction",
+                "tool": "stock_info",
+                "original_ticker": ticker,
+                "suggested_ticker": suggestion
+            })
+            if answer == 'y':
+                result = get_stock_info(suggestion)
+            else:
+                result = {
+                    "error": f"Stopped: '{ticker}' not found, correction declined."}
+    return result
 
 
 @tool
-def price_history(ticker: str, start_date: str) -> dict:
-    """Fetch historical price performance for a stock ticker over a specified period (e.g. '1mo', '6mo', '1y')."""
-    return get_price_history(ticker, start_date)
+def price_history(ticker: str, period: Literal["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"] = "6mo") -> dict:
+    """Fetch historical price performance for a stock ticker over a specified period."""
+    return get_price_history(ticker, period)
 
 
 @tool
@@ -116,14 +135,26 @@ builder.add_edge(START, "call_model")
 builder.add_conditional_edges("call_model", tools_condition)
 builder.add_edge("tools", "call_model")  # the cycle replaces your for loop
 
-graph = builder.compile()
+checkpointer = InMemorySaver()
+graph = builder.compile(checkpointer=checkpointer)
 
 # ── 6. RUN IT ─────────────────────────────────────────────
 
 
 def ask(question: str) -> str:
+    config = {"configurable": {
+        "thread_id": "cli-session"}, "recursion_limit": 15}
     result = graph.invoke({"messages": [{"role": "user", "content": question}]},
-                          config={"recursion_limit": 15})
+                          config=config)
+
+    while "__interrupt__" in result:
+        payload = result["__interrupt__"][0].value
+        answer = input(
+            f"\n⚠️  '{payload['original_ticker']}' returned no data. Did you mean "
+            f"'{payload['suggested_ticker']}'? [y] accept and retry / [n] stop: "
+        ).strip().lower()
+        result = graph.invoke(Command(resume=answer), config=config)
+
     return result["messages"][-1].content
 
 
