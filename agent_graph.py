@@ -63,7 +63,8 @@ tools = [stock_info, price_history, company_profile, web_search]
 # Same OpenRouter setup as agent.py, just via LangChain's ChatOpenAI wrapper
 # instead of the raw OpenAI SDK client.
 
-MODEL = "openrouter/auto"
+# MODEL = "openrouter/auto"
+MODEL = "openrouter/free"
 
 model = ChatOpenAI(
     model=MODEL,
