@@ -120,12 +120,18 @@ does, and how it compares to BBB.NS"
 
 Plan:
 [
-  {"step": 1, "tool": "get_stock_info", "ticker": "AAA.NS", "reason": "Valuation for AAA.NS", "depends_on": []},
-  {"step": 2, "tool": "get_price_history", "ticker": "AAA.NS", "reason": "Performance for AAA.NS", "depends_on": []},
-  {"step": 3, "tool": "get_company_profile", "ticker": "AAA.NS", "reason": "What AAA.NS's business does", "depends_on": []},
-  {"step": 4, "tool": "get_stock_info", "ticker": "BBB.NS", "reason": "Valuation for BBB.NS, to compare against AAA.NS", "depends_on": []},
-  {"step": 5, "tool": "get_price_history", "ticker": "BBB.NS", "reason": "Performance for BBB.NS, to compare against AAA.NS", "depends_on": []},
-  {"step": 6, "tool": "get_company_profile", "ticker": "BBB.NS", "reason": "What BBB.NS's business does, for a complete comparison", "depends_on": []}
+  {"step": 1, "tool": "get_stock_info", "ticker": "AAA.NS",
+      "reason": "Valuation for AAA.NS", "depends_on": []},
+  {"step": 2, "tool": "get_price_history", "ticker": "AAA.NS",
+      "reason": "Performance for AAA.NS", "depends_on": []},
+  {"step": 3, "tool": "get_company_profile", "ticker": "AAA.NS",
+      "reason": "What AAA.NS's business does", "depends_on": []},
+  {"step": 4, "tool": "get_stock_info", "ticker": "BBB.NS",
+      "reason": "Valuation for BBB.NS, to compare against AAA.NS", "depends_on": []},
+  {"step": 5, "tool": "get_price_history", "ticker": "BBB.NS",
+      "reason": "Performance for BBB.NS, to compare against AAA.NS", "depends_on": []},
+  {"step": 6, "tool": "get_company_profile", "ticker": "BBB.NS",
+      "reason": "What BBB.NS's business does, for a complete comparison", "depends_on": []}
 ]
 
 Notice BBB.NS gets a company profile step too, even though the question only explicitly
@@ -174,12 +180,18 @@ client = wrap_openai(OpenAI(
 
 # MODEL = "anthropic/claude-sonnet-4.6"  # swap to any model OpenRouter hosts, no code change
 # MODEL = "meta/muse-spark-1.2"
-MODEL = "moonshotai/kimi-k3"  # swap to any model OpenRouter hosts, no code change
+# MODEL = "moonshotai/kimi-k3"  # swap to any model OpenRouter hosts, no code change
+PLANNER_MODEL = "qwen/qwen3-235b-a22b-2507"   # cheap, paid, reliable
+EXECUTOR_MODEL = "qwen/qwen3-235b-a22b-2507"  # the reasoning-heavy loop
+
+# low-stakes only
+CHEAP_MODEL = "openrouter/free"
 
 
 def get_plan(question: str) -> str:
     response = client.chat.completions.create(
-        model=MODEL,
+        model=PLANNER_MODEL,
+        max_tokens=2048,   # planning output should be short — this is generous
         messages=[
             {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
             {"role": "user", "content": question}
@@ -235,20 +247,25 @@ def is_not_found_error(result: dict) -> bool:
 
 
 def suggest_ticker_correction(bad_ticker: str) -> str | None:
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": (
-                "You are a ticker-symbol correction assistant. Given a stock ticker that "
-                "returned no data, suggest the most likely correct NSE ticker symbol "
-                "(ending in .NS). Respond with ONLY the ticker, or the single word UNKNOWN "
-                "if you have no confident guess. No explanation."
-            )},
-            {"role": "user", "content": f"This ticker returned no data: {bad_ticker}"}
-        ]
-    )
-    suggestion = response.choices[0].message.content.strip()
-    return None if suggestion.upper() == "UNKNOWN" else suggestion
+
+    try:
+        response = client.chat.completions.create(
+            model=CHEAP_MODEL,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a ticker-symbol correction assistant. Given a stock ticker that "
+                    "returned no data, suggest the most likely correct NSE ticker symbol "
+                    "(ending in .NS). Respond with ONLY the ticker, or the single word UNKNOWN "
+                    "if you have no confident guess. No explanation."
+                )},
+                {"role": "user", "content": f"This ticker returned no data: {bad_ticker}"}
+            ])
+        suggestion = response.choices[0].message.content.strip()
+        return None if suggestion.upper() == "UNKNOWN" else suggestion
+    except Exception as e:
+        print(
+            f"⚠️ Correction suggestion unavailable ({e}); proceeding without a suggested fix.")
+        return None
 
 
 @traceable
@@ -269,7 +286,7 @@ def ask(question: str):
 
     for iteration in range(max_iterations):
         response = client.chat.completions.create(
-            model=MODEL, tools=tools, messages=messages)
+            model=EXECUTOR_MODEL, tools=tools, messages=messages)
         msg = response.choices[0].message
         messages.append(msg)
 
