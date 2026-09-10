@@ -148,3 +148,65 @@ the same grounding discipline applied to the numbers table later in the same res
 3. This is a genuine, open reliability question worth carrying into any future
    evaluation/eval-harness work (tier 6 territory) rather than something a single
    prompt tweak is likely to fully close.
+
+### v5.2 — agent_graph.py reaches full tier-4 parity
+
+Two remaining gaps from the migration are now closed:
+
+**Deviation checker ported.** Reused `agent.py`'s existing `parse_plan` and
+`report_plan_deviation` functions unchanged — no new comparison logic written.
+`plan_node` now saves the raw plan text into a new `plan` field on `AgentState`
+(a LangGraph node only needs to return the state keys it actually changes; every
+other key, including `plan`, passes through untouched on every subsequent node —
+this is the Pregel/channel model discussed earlier: nodes write to specific
+channels, not the whole state). After the graph finishes, `ask()` reconstructs
+what actually executed from the message history via a new `extract_executed_calls`
+helper, then feeds both into the same deviation-check function `agent.py` already
+validated.
+
+**Found and fixed a naming-mismatch bug while wiring this up**: the `@tool`-decorated
+wrapper functions in `agent_graph.py` were named `stock_info`, `price_history`,
+`company_profile` (no `get_` prefix) — a naming choice made when first porting them,
+inconsistent with `PLANNER_SYSTEM_PROMPT` (reused from agent.py), which describes the
+tools as `get_stock_info`, etc. This caused the deviation checker to report EVERY
+planned step as "never executed" even when execution was fully correct, purely
+because `"stock_info" != "get_stock_info"` as strings. Fixed by renaming the `@tool`
+wrappers to match, aliasing the raw tools.py imports (`get_stock_info as
+_get_stock_info`, etc.) to avoid a naming collision. Confirmed fixed: a full 6-step
+plan (Suzlon vs Waaree, including a ticker correction) now executes with zero false
+deviation warnings.
+
+**Correction caching re-confirmed working alongside this fix**: the same broken
+ticker (WAAREE.NS) needed by 3 separate tool calls triggered exactly one interrupt
+prompt, not three, consistent with the per-run cache added earlier.
+
+**agent_graph.py is now at full functional parity with agent.py's tier-4 feature
+set**: planner, ReAct loop, human-gated ticker correction with caching, and
+plan-vs-execution deviation checking — implemented via LangGraph's state/node/edge
+primitives (StateGraph, ToolNode, tools_condition, interrupt()/Command(resume=...),
+InMemorySaver) instead of the hand-rolled for-loop and lists in agent.py.
+
+### Model configuration (as of v5.2)
+
+- `PLANNER_MODEL` / `EXECUTOR_MODEL`: pinned to `qwen/qwen3-235b-a22b-instruct-2507`
+  (paid, ~$0.09/$0.10 per million tokens, open-weight/Apache 2.0) — deliberately NOT
+  `openrouter/auto` or `openrouter/free`, after discovering mid-session that those
+  routers can silently serve a DIFFERENT underlying model on every turn of the same
+  conversation, confounding any reliability finding.
+- `CHEAP_MODEL`: `openrouter/free` — used only for the low-stakes,
+  human-gated `suggest_ticker_correction` call, where router-level model rotation is
+  a feature (resilience against one specific free model's shared-pool rate limits)
+  rather than a bug, since a wrong suggestion here costs nothing (human approves or
+  types the correct ticker regardless).
+
+### Still open, not urgent
+
+- Interrupt-resume replays the whole tool node from the top (documented earlier;
+  harmless for current read-only tools, a real risk once any tool has a side effect)
+- Formal model-agnosticism (swapping models safely per call-type, validated via an
+  eval set rather than ad hoc testing) — deliberately deferred as "tier 5.5", to be
+  tackled after the tier-5 multi-agent split, not before
+- Tier 5 itself (the actual quant-agent / qualitative-agent / supervisor split) has
+  NOT been started yet — everything through v5.2 has been porting the existing
+  tier-4 single-agent architecture into LangGraph's primitives, not building the
+  multi-agent architecture tier 5 actually refers to

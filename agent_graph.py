@@ -3,9 +3,15 @@ import sys
 
 from agent import PLANNER_SYSTEM_PROMPT, is_not_found_error, suggest_ticker_correction
 from agent import PLANNER_MODEL, EXECUTOR_MODEL, client
+from agent import parse_plan, report_plan_deviation
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from tools import get_stock_info, get_price_history, get_company_profile, get_web_search
+from tools import (
+    get_stock_info as _get_stock_info,
+    get_price_history as _get_price_history,
+    get_company_profile as _get_company_profile,
+    get_web_search as _get_web_search,
+)
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import add_messages
@@ -30,6 +36,7 @@ load_dotenv()
 
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
+    plan: str
 
 
 # ── 2. TOOLS ──────────────────────────────────────────────
@@ -38,34 +45,35 @@ class AgentState(TypedDict):
 # maintained by hand in agent.py's `tools` list.
 
 @tool
-def stock_info(ticker: str) -> dict:
+def get_stock_info(ticker: str) -> dict:
     """Get current price and key financial ratios (PE, market cap, etc.) for a stock ticker (NSE tickers end in .NS)."""
-    return handle_ticker_error(get_stock_info, ticker, "stock_info")
+    return handle_ticker_error(_get_stock_info, ticker, "get_stock_info")
 
 
 @tool
-def price_history(
+def get_price_history(
     ticker: str,
     period: Literal["1d", "5d", "1mo", "3mo", "6mo",
                     "1y", "2y", "5y", "10y", "ytd", "max"] = "6mo"
 ) -> dict:
     """Fetch historical price performance for a stock ticker over a specified period."""
-    return handle_ticker_error(lambda t: get_price_history(t, period), ticker, "price_history")
+    return handle_ticker_error(lambda t: _get_price_history(t, period), ticker, "get_price_history")
 
 
 @tool
-def company_profile(ticker: str) -> dict:
+def get_company_profile(ticker: str) -> dict:
     """Get a company's business description, sector, industry, and employee count. Use for 'what does this business do' questions, NOT price or valuation."""
-    return handle_ticker_error(get_company_profile, ticker, "company_profile")
+    return handle_ticker_error(_get_company_profile, ticker, "get_company_profile")
 
 
 @tool
-def web_search(query: str) -> dict:
+def get_web_search(query: str) -> dict:
     """Search the web for current news, commentary, or qualitative context not available from the other tools (e.g. management changes, recent events, analyst sentiment)."""
-    return get_web_search(query)
+    return handle_ticker_error(_get_web_search, query, "get_web_search")
 
 
-tools = [stock_info, price_history, company_profile, web_search]
+tools = [get_stock_info, get_price_history,
+         get_company_profile, get_web_search]
 
 # ── 3. MODEL ──────────────────────────────────────────────
 # Same OpenRouter setup as agent.py, just via LangChain's ChatOpenAI wrapper
@@ -146,7 +154,9 @@ def plan_node(state: AgentState) -> AgentState:
     question = state["messages"][-1].content
     plan_text = get_plan(question)
     print(f"Plan for question '{question}':\n{plan_text}\n")
-    return {"messages": [{"role": "assistant", "content": f"Here is my plan before executing:\n{plan_text}"}]}
+    return {"messages": [{"role": "assistant", "content": f"Here is my plan before executing:\n{plan_text}"}],
+            "plan": plan_text,
+            }
 
 
 def call_model(state: AgentState) -> AgentState:
@@ -181,13 +191,26 @@ graph = builder.compile(checkpointer=checkpointer)
 # ── 6. RUN IT ─────────────────────────────────────────────
 
 
+def extract_executed_calls(messages):
+    calls = []
+    for msg in messages:
+        for tc in getattr(msg, "tool_calls", None) or []:
+            name = tc["name"]
+            ticker = tc["args"].get("ticker")
+            substituted_from = None
+            if ticker in _ticker_corrections:
+                substituted_from = ticker
+                ticker = _ticker_corrections[ticker]
+            calls.append((name, ticker, substituted_from))
+    return calls
+
+
 def ask(question: str) -> str:
     config = {"configurable": {
         "thread_id": "cli-session"}, "recursion_limit": 15}
     try:
-        result = graph.invoke({"messages": [{"role": "user", "content": question}]},
-                              config=config)
-
+        result = graph.invoke(
+            {"messages": [{"role": "user", "content": question}]}, config=config)
         while "__interrupt__" in result:
             payload = result["__interrupt__"][0].value
             suggestion_text = f"Did you mean '{payload['suggested_ticker']}'? " if payload[
@@ -197,6 +220,12 @@ def ask(question: str) -> str:
                 f"[y] accept / [n] stop / or type the correct ticker: "
             ).strip()
             result = graph.invoke(Command(resume=answer), config=config)
+
+        planned_steps = parse_plan(result.get("plan", ""))
+        executed_calls = extract_executed_calls(result["messages"])
+        report_plan_deviation(planned_steps, executed_calls)
+
+        return result["messages"][-1].content
     except GraphRecursionError:
         return "I wasn't able to resolve this within the allowed number of steps."
 
