@@ -1,3 +1,4 @@
+import yfinance as yf
 from ._common import _fetch_url, _safe_get
 from typing import Dict, Any, Optional
 
@@ -105,3 +106,16 @@ def get_stock_info(symbol: str, timeout: int = 10) -> Dict[str, Any]:
     if result["error"] is None:
         result["error"] = "Unable to fetch data from any source"
     return result
+
+
+def suggest_ticker_correction(bad_ticker: str) -> str | None:
+    # strip suffix/noise, search the company name portion
+    search_term = bad_ticker.replace(".NS", "").replace(".BO", "")
+    try:
+        results = yf.Search(search_term, max_results=3).quotes
+        for r in results:
+            if r.get("exchange") in ("NSI", "BSE"):  # prefer Indian exchanges
+                return r["symbol"]
+        return results[0]["symbol"] if results else None
+    except Exception:
+        return None

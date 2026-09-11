@@ -2,7 +2,8 @@
 import sys
 
 from agent import parse_plan, report_plan_deviation
-from graph_nodes import plan_node, call_model, extract_executed_calls, AgentState, tools
+from graph_nodes import call_model, extract_executed_calls, AgentState, _tools
+from graph_planner import plan_node
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -20,7 +21,7 @@ load_dotenv()
 
 # ToolNode is prebuilt — it replaces your hand-written dispatch_tool if/elif
 # chain AND already handles multiple simultaneous tool calls in one turn.
-tool_node = ToolNode(tools)
+tool_node = ToolNode(_tools)
 
 # ── 5. WIRE THE GRAPH ─────────────────────────────────────
 builder = StateGraph(AgentState)
