@@ -1,7 +1,6 @@
 import os
-from agent import EXECUTOR_MODEL
-from graph_tools import get_stock_info, get_price_history, get_company_profile, get_web_search
-from graph_prompts import EXECUTOR_SYSTEM_PROMPT
+from graph_tools import get_stock_info, get_price_history, get_company_profile, get_web_search, lookup_stock_symbol
+from graph_prompts import EXECUTOR_SYSTEM_PROMPT, EXECUTOR_MODEL
 from graph_tools import _ticker_corrections
 from langchain_core.messages import SystemMessage
 from typing import Annotated
@@ -20,7 +19,7 @@ class AgentState(TypedDict):
     plan: str
 
 
-_tools = [get_stock_info, get_price_history,
+_tools = [lookup_stock_symbol, get_stock_info, get_price_history,
           get_company_profile, get_web_search]
 
 

@@ -1,9 +1,7 @@
-
 import sys
 
-from agent import parse_plan, report_plan_deviation
 from graph_nodes import call_model, extract_executed_calls, AgentState, _tools
-from graph_planner import plan_node
+from graph_planner import plan_node, parse_plan, report_plan_deviation
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -64,8 +62,6 @@ def ask(question: str) -> str:
         return result["messages"][-1].content
     except GraphRecursionError:
         return "I wasn't able to resolve this within the allowed number of steps."
-
-    return result["messages"][-1].content
 
 
 if __name__ == "__main__":

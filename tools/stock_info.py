@@ -108,7 +108,7 @@ def get_stock_info(symbol: str, timeout: int = 10) -> Dict[str, Any]:
     return result
 
 
-def suggest_ticker_correction(bad_ticker: str) -> str | None:
+def suggest_ticker_correction_yf(bad_ticker: str) -> str | None:
     # strip suffix/noise, search the company name portion
     search_term = bad_ticker.replace(".NS", "").replace(".BO", "")
     try:
@@ -119,3 +119,18 @@ def suggest_ticker_correction(bad_ticker: str) -> str | None:
         return results[0]["symbol"] if results else None
     except Exception:
         return None
+
+
+def lookup_stock_symbol(company_name_or_query: str) -> dict:
+    """Search Yahoo Finance for matching ticker symbols given a company name or query."""
+    try:
+        search = yf.Search(company_name_or_query, max_results=5)
+        return {
+            "results": [
+                {"symbol": q.get("symbol"), "name": q.get(
+                    "shortname") or q.get("longname")}
+                for q in search.quotes
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
