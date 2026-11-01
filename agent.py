@@ -94,19 +94,28 @@ tools = [{
 }]
 
 
+# client = wrap_openai(OpenAI(
+#     base_url="https://openrouter.ai/api/v1",
+#     api_key=os.environ["OPENROUTER_API_KEY"],
+# ))
+
 client = wrap_openai(OpenAI(
-    base_url="https://openrouter.ai/api/v1",
+    base_url="http://localhost:8081/v1",
     api_key=os.environ["OPENROUTER_API_KEY"],
 ))
+
 
 # MODEL = "anthropic/claude-sonnet-4.6"  # swap to any model OpenRouter hosts, no code change
 # MODEL = "meta/muse-spark-1.2"
 # MODEL = "moonshotai/kimi-k3"  # swap to any model OpenRouter hosts, no code change
-PLANNER_MODEL = "qwen/qwen3-235b-a22b-2507"   # cheap, paid, reliable
-EXECUTOR_MODEL = "qwen/qwen3-235b-a22b-2507"  # the reasoning-heavy loop
+# PLANNER_MODEL = "qwen/qwen3-235b-a22b-2507"   # cheap, paid, reliable
+# EXECUTOR_MODEL = "qwen/qwen3-235b-a22b-2507"  # the reasoning-heavy loop
 
-# low-stakes only
-CHEAP_MODEL = "openrouter/free"
+# # low-stakes only
+# CHEAP_MODEL = "openrouter/free"
+
+# llama.cpp local model
+PLANNER_MODEL = EXECUTOR_MODEL = CHEAP_MODEL = "qwen2.5-3b-instruct"
 
 
 def get_plan(question: str) -> str:

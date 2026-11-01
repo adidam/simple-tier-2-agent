@@ -27,8 +27,10 @@ def is_not_found_error(result: dict) -> bool:
 def suggest_ticker_correction(bad_ticker: str) -> str | None:
     # for ticker correction suggestions only, not the main executor
     CHEAP_MODEL = "meta-llama/llama-3.1-8b-instruct"
+    # CHEAP_MODEL = "qwen2.5-coder-3b-instruct"
     client = wrap_openai(OpenAI(
         base_url="https://openrouter.ai/api/v1",
+        # base_url="http://localhost:8081/v1",
         api_key=os.environ["OPENROUTER_API_KEY"],
     ))
 

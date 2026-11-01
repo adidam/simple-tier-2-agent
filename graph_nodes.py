@@ -32,6 +32,7 @@ model = ChatOpenAI(
     model=EXECUTOR_MODEL,
     max_tokens=4096,   # a bit more room for synthesis than the planner needs
     base_url="https://openrouter.ai/api/v1",
+    # base_url="http://localhost:8081/v1",
     api_key=(lambda: os.environ["OPENROUTER_API_KEY"]),
 ).bind_tools(_tools)
 

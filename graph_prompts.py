@@ -90,6 +90,7 @@ EXECUTOR_SYSTEM_PROMPT = (
 # MODEL = "meta/muse-spark-1.2"
 # MODEL = "moonshotai/kimi-k3"  # swap to any model OpenRouter hosts, no code change
 EXECUTOR_MODEL = "qwen/qwen3-235b-a22b-2507"  # the reasoning-heavy loop
+# EXECUTOR_MODEL = "qwen2.5-coder-3b-instruct"  # the reasoning-heavy loop
 
 # low-stakes only
 CHEAP_MODEL = "openrouter/free"

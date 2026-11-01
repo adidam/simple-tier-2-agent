@@ -18,13 +18,16 @@ load_dotenv()
 
 # paid, reliable, pinned deliberately —
 PLANNER_MODEL = "qwen/qwen3-235b-a22b-2507"
+# PLANNER_MODEL = "qwen2.5-coder-3b-instruct"
 # openrouter/auto and openrouter/free can silently serve a DIFFERENT underlying
 # model on every call, even within one conversation. Planning and synthesis are
 # the highest-stakes steps in this pipeline, so they stay on a fixed model.
 
 # reads OPENROUTER_API_KEY from env
-_client = OpenAI(base_url="https://openrouter.ai/api/v1",
-                 api_key=(lambda: os.environ["OPENROUTER_API_KEY"]))
+_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    # base_url="http://localhost:8081/v1",
+    api_key=(lambda: os.environ["OPENROUTER_API_KEY"]))
 
 
 def get_plan(question: str) -> str:
